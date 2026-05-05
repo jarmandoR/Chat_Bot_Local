@@ -597,8 +597,8 @@ function iniciarPanelAdmin() {
     responder(res, 404, '<h1>404</h1>');
   });
 
-  server.listen(ADMIN_PORT, '127.0.0.1', () => {
-    console.log(`Panel admin: http://127.0.0.1:${ADMIN_PORT}/?token=${ADMIN_TOKEN}`);
+  server.listen(ADMIN_PORT, '0.0.0.0', () => {
+    console.log(`Panel admin: http://0.0.0.0:${ADMIN_PORT}/?token=${ADMIN_TOKEN}`);
     if (!process.env.ADMIN_TOKEN) {
       console.log('Configure ADMIN_TOKEN para dejar una clave fija de administracion.');
     }
