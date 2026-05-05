@@ -340,7 +340,7 @@ function renderBotCard(id, token) {
   const nombre = estado.nombre || 'Sin nombre';
   const error = estado.lastError ? `<div class="error">${htmlEscape(estado.lastError)}</div>` : '';
   const qr = estado.qrText
-    ? `<pre class="qr">${htmlEscape(estado.qrText)}</pre><small>QR generado: ${htmlEscape(estado.qrAt.toLocaleString())}</small>`
+    ? `<pre class="qr">${htmlEscape(estado.qrText)}</pre><small>QR generado: ${htmlEscape(estado.qrAt.toLocaleString())} <span class="qr-countdown" data-qr-at="${estado.qrAt.toISOString()}"></span></small>`
     : '<div class="muted">Sin QR activo.</div>';
 
   return `
@@ -430,6 +430,22 @@ function renderPanel(reqUrl) {
     button { background: var(--verde); color: white; border: 0; border-radius: 6px; padding: 10px 14px; cursor: pointer; font-weight: 700; box-shadow: 0 1px 0 rgba(0,0,0,0.08); }
     button:hover { background: #006f5d; }
     button[disabled] { cursor: wait; opacity: 0.7; }
+    .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      margin-right: 8px;
+      border: 2px solid rgba(255,255,255,0.55);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .qr-countdown { display: inline-block; margin-left: 8px; font-weight: 700; color: #facc15; }
+    .qr-countdown.expired { color: #dc2626; }
     .badge { display: inline-block; border-radius: 999px; padding: 5px 10px; font-size: 12px; font-weight: 800; }
     .badge.ok { background: #dcfce7; color: #166534; }
     .badge.warn { background: #fef3c7; color: #92400e; }
@@ -478,8 +494,42 @@ function renderPanel(reqUrl) {
       const current = document.getElementById('bot-' + id);
       if (current) {
         current.outerHTML = html;
+        initQrTimers();
       }
     }
+
+    const QR_TTL_SECONDS = 60;
+
+    function formatDuration(seconds) {
+      const minutes = Math.floor(seconds / 60);
+      const secs = seconds % 60;
+      return `${minutes}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    function updateQrTimer(element) {
+      const qrAt = element.dataset.qrAt ? new Date(element.dataset.qrAt) : null;
+      if (!qrAt) return;
+
+      const elapsed = Math.floor((Date.now() - qrAt.getTime()) / 1000);
+      const remaining = QR_TTL_SECONDS - elapsed;
+      if (remaining > 0) {
+        element.textContent = `expira en ${formatDuration(remaining)}`;
+        element.classList.remove('expired');
+      } else {
+        element.textContent = 'QR expirado';
+        element.classList.add('expired');
+      }
+    }
+
+    function initQrTimers() {
+      const timerElements = document.querySelectorAll('.qr-countdown');
+      if (!timerElements.length) return;
+      timerElements.forEach(updateQrTimer);
+    }
+
+    setInterval(() => {
+      document.querySelectorAll('.qr-countdown').forEach(updateQrTimer);
+    }, 1000);
 
     async function replaceSummary() {
       const response = await fetch('/summary?token=' + encodeURIComponent(token));
@@ -504,7 +554,7 @@ function renderPanel(reqUrl) {
         const id = qrForm.dataset.botId;
         const button = qrForm.querySelector('button');
         button.disabled = true;
-        button.textContent = 'Generando...';
+        button.innerHTML = '<span class="spinner"></span>Generando...';
 
         try {
           await fetch(qrForm.action, { method: 'POST' });
@@ -517,7 +567,7 @@ function renderPanel(reqUrl) {
           const updatedButton = document.querySelector('#bot-' + CSS.escape(id) + ' [data-qr-form] button');
           if (updatedButton) {
             updatedButton.disabled = false;
-            updatedButton.textContent = 'Generar QR';
+            updatedButton.innerHTML = 'Generar QR';
           }
         }
         return;
@@ -541,6 +591,8 @@ function renderPanel(reqUrl) {
         }
       }
     });
+
+    initQrTimers();
   </script>
 </body>
 </html>`;
