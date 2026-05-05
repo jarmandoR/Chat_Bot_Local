@@ -503,7 +503,7 @@ function renderPanel(reqUrl) {
     function formatDuration(seconds) {
       const minutes = Math.floor(seconds / 60);
       const secs = seconds % 60;
-      return `${minutes}:${secs.toString().padStart(2, '0')}`;
+      return minutes + ':' + secs.toString().padStart(2, '0');
     }
 
     function updateQrTimer(element) {
@@ -513,7 +513,7 @@ function renderPanel(reqUrl) {
       const elapsed = Math.floor((Date.now() - qrAt.getTime()) / 1000);
       const remaining = QR_TTL_SECONDS - elapsed;
       if (remaining > 0) {
-        element.textContent = `expira en ${formatDuration(remaining)}`;
+        element.textContent = 'expira en ' + formatDuration(remaining);
         element.classList.remove('expired');
       } else {
         element.textContent = 'QR expirado';
