@@ -39,6 +39,26 @@ const { URL } = require('url');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
+function cargarEnvLocal() {
+  const envPath = path.join(__dirname, '.env');
+  if (!fs.existsSync(envPath)) return;
+
+  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+  for (const line of lines) {
+    const cleanLine = line.trim();
+    if (!cleanLine || cleanLine.startsWith('#')) continue;
+
+    const separatorIndex = cleanLine.indexOf('=');
+    if (separatorIndex === -1) continue;
+
+    const key = cleanLine.slice(0, separatorIndex).trim();
+    const value = cleanLine.slice(separatorIndex + 1).trim().replace(/^["']|["']$/g, '');
+    if (key && process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+cargarEnvLocal();
+
 const ADMIN_PORT = Number(process.env.ADMIN_PORT || 3030);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || crypto.randomBytes(18).toString('hex');
 const AUTH_DIR = path.join(__dirname, '.wwebjs_auth');
