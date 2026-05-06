@@ -147,17 +147,43 @@ function actualizarInfoVinculada(estado, client) {
   if (info.pushname) estado.nombre = info.pushname;
 }
 
+function esErrorFrameTransitorio(err) {
+  const message = String(err && err.message ? err.message : err || '');
+  return /detached\s+frame|execution context was destroyed|cannot find context/i.test(message);
+}
+
+async function destruirCliente(client) {
+  if (!client) return;
+
+  try {
+    await client.destroy();
+  } catch (err) {
+    console.error('No se pudo cerrar el cliente anterior:', err.message);
+  }
+}
+
 async function verificarEstadoBot(estado) {
   if (!estado.client) return;
 
   try {
+    if (estado.client.pupPage && estado.client.pupPage.isClosed()) {
+      estado.status = 'desconectado';
+      estado.waState = 'BROWSER_CLOSED';
+      estado.client = null;
+      estado.lastCheckAt = new Date();
+      estado.lastDisconnectedAt = new Date();
+      return;
+    }
+
     const waState = await estado.client.getState();
     estado.waState = waState || '';
     estado.lastCheckAt = new Date();
     actualizarInfoVinculada(estado, estado.client);
+    if (!waState || waState === 'UNPAIRED' || waState === 'UNPAIRED_IDLE') estado.lastError = '';
 
     if (waState === 'CONNECTED') {
       estado.status = 'listo';
+      estado.lastError = '';
       return;
     }
 
@@ -166,8 +192,15 @@ async function verificarEstadoBot(estado) {
       estado.lastDisconnectedAt = new Date();
     }
   } catch (err) {
-    estado.lastError = err.message;
     estado.lastCheckAt = new Date();
+
+    if (esErrorFrameTransitorio(err)) {
+      if (estado.status === 'error') estado.status = 'iniciando';
+      estado.waState = estado.waState || 'CARGANDO';
+      return;
+    }
+
+    estado.lastError = err.message;
 
     if (estado.status === 'listo' || estado.status === 'autenticado') {
       estado.status = 'desconectado';
@@ -196,6 +229,12 @@ function iniciarBot(id, opciones = {}) {
 
   if (estado.client) {
     if (opciones.manualQr) estado.manualQr = true;
+    if (estado.status === 'error') {
+      destruirCliente(estado.client).finally(() => {
+        estado.client = null;
+        iniciarBot(id, opciones);
+      });
+    }
     return estado;
   }
 
@@ -227,6 +266,7 @@ function iniciarBot(id, opciones = {}) {
       estado.qrAt = new Date();
       estado.status = 'esperando_qr';
       estado.waState = 'QR';
+      estado.lastError = '';
 
       if (estado.manualQr) {
         console.log(`\nEscanea QR para conectar ${id}`);
@@ -242,6 +282,7 @@ function iniciarBot(id, opciones = {}) {
     estado.manualQr = false;
     estado.qrText = '';
     estado.qrAt = null;
+    estado.lastError = '';
     console.log(`${id} autenticado`);
   });
 
@@ -250,6 +291,7 @@ function iniciarBot(id, opciones = {}) {
     estado.waState = 'CONNECTED';
     estado.manualQr = false;
     estado.lastReadyAt = new Date();
+    estado.lastError = '';
     actualizarInfoVinculada(estado, client);
     console.log(`${id} listo`);
   });
@@ -298,6 +340,14 @@ function iniciarBot(id, opciones = {}) {
   });
 
   client.initialize().catch(err => {
+    if (esErrorFrameTransitorio(err)) {
+      estado.status = estado.qrText ? 'esperando_qr' : 'iniciando';
+      estado.waState = estado.qrText ? 'QR' : 'CARGANDO';
+      estado.lastError = '';
+      console.warn(`${id} navegando en WhatsApp Web, reintentando estado...`);
+      return;
+    }
+
     estado.status = 'error';
     estado.waState = 'ERROR';
     estado.lastError = err.message;
