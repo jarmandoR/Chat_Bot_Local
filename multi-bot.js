@@ -63,6 +63,9 @@ const ADMIN_PORT = Number(process.env.ADMIN_PORT || 3030);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || crypto.randomBytes(18).toString('hex');
 const AUTH_DIR = path.join(__dirname, '.wwebjs_auth');
 const clients = new Map();
+const BOT_START_DELAY_MS = Number(process.env.BOT_START_DELAY_MS || 12000);
+const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS || 60000);
+const TRANSIENT_RESTART_LIMIT = Number(process.env.TRANSIENT_RESTART_LIMIT || 3);
 
 const mensajeComun = `👋 Hola, somos *Transmillas* 🚛
 
@@ -126,6 +129,8 @@ function crearEstado(id) {
     qrAt: null,
     manualQr: false,
     reconnectTimer: null,
+    restartTimer: null,
+    transientErrors: 0,
     lastError: '',
     lastReadyAt: null,
     lastCheckAt: null,
@@ -149,7 +154,7 @@ function actualizarInfoVinculada(estado, client) {
 
 function esErrorFrameTransitorio(err) {
   const message = String(err && err.message ? err.message : err || '');
-  return /detached\s+frame|execution context was destroyed|cannot find context/i.test(message);
+  return /detached\s+frame|execution context was destroyed|cannot find context|runtime\.callfunctionon timed out|protocoltimeout/i.test(message);
 }
 
 async function destruirCliente(client) {
@@ -160,6 +165,23 @@ async function destruirCliente(client) {
   } catch (err) {
     console.error('No se pudo cerrar el cliente anterior:', err.message);
   }
+}
+
+function programarReinicioBot(estado, motivo, delayMs = 8000) {
+  if (estado.restartTimer) return;
+
+  console.warn(`${estado.id} reiniciando navegador por ${motivo}...`);
+  estado.restartTimer = setTimeout(() => {
+    const client = estado.client;
+    estado.restartTimer = null;
+    estado.client = null;
+    estado.status = 'iniciando';
+    estado.waState = 'RESTARTING';
+
+    destruirCliente(client).finally(() => {
+      iniciarBot(estado.id, { manualQr: estado.manualQr });
+    });
+  }, delayMs);
 }
 
 async function verificarEstadoBot(estado) {
@@ -178,6 +200,7 @@ async function verificarEstadoBot(estado) {
     const waState = await estado.client.getState();
     estado.waState = waState || '';
     estado.lastCheckAt = new Date();
+    estado.transientErrors = 0;
     actualizarInfoVinculada(estado, estado.client);
     if (!waState || waState === 'UNPAIRED' || waState === 'UNPAIRED_IDLE') estado.lastError = '';
 
@@ -195,8 +218,16 @@ async function verificarEstadoBot(estado) {
     estado.lastCheckAt = new Date();
 
     if (esErrorFrameTransitorio(err)) {
+      estado.transientErrors += 1;
+      estado.lastError = '';
       if (estado.status === 'error') estado.status = 'iniciando';
       estado.waState = estado.waState || 'CARGANDO';
+
+      if (estado.transientErrors >= TRANSIENT_RESTART_LIMIT) {
+        estado.transientErrors = 0;
+        programarReinicioBot(estado, 'timeouts repetidos');
+      }
+
       return;
     }
 
@@ -221,7 +252,7 @@ function iniciarMonitorEstados() {
     verificarEstadosBots().catch(err => {
       console.error('Error verificando estados:', err.message);
     });
-  }, 30000);
+  }, CHECK_INTERVAL_MS);
 }
 
 function iniciarBot(id, opciones = {}) {
@@ -244,16 +275,22 @@ function iniciarBot(id, opciones = {}) {
   estado.qrText = '';
   estado.qrAt = null;
   estado.lastError = '';
+  estado.transientErrors = 0;
 
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: id }),
     puppeteer: {
       headless: true,
+      protocolTimeout: 300000,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu'
+        '--disable-gpu',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--no-first-run',
+        '--no-zygote'
       ]
     }
   });
@@ -267,6 +304,7 @@ function iniciarBot(id, opciones = {}) {
       estado.status = 'esperando_qr';
       estado.waState = 'QR';
       estado.lastError = '';
+      estado.transientErrors = 0;
 
       if (estado.manualQr) {
         console.log(`\nEscanea QR para conectar ${id}`);
@@ -283,6 +321,7 @@ function iniciarBot(id, opciones = {}) {
     estado.qrText = '';
     estado.qrAt = null;
     estado.lastError = '';
+    estado.transientErrors = 0;
     console.log(`${id} autenticado`);
   });
 
@@ -292,6 +331,7 @@ function iniciarBot(id, opciones = {}) {
     estado.manualQr = false;
     estado.lastReadyAt = new Date();
     estado.lastError = '';
+    estado.transientErrors = 0;
     actualizarInfoVinculada(estado, client);
     console.log(`${id} listo`);
   });
@@ -331,6 +371,7 @@ function iniciarBot(id, opciones = {}) {
     estado.status = 'desconectado';
     estado.waState = String(reason || 'DISCONNECTED');
     estado.client = null;
+    estado.transientErrors = 0;
     estado.lastDisconnectedAt = new Date();
 
     if (estado.reconnectTimer) clearTimeout(estado.reconnectTimer);
@@ -341,10 +382,17 @@ function iniciarBot(id, opciones = {}) {
 
   client.initialize().catch(err => {
     if (esErrorFrameTransitorio(err)) {
+      estado.transientErrors += 1;
       estado.status = estado.qrText ? 'esperando_qr' : 'iniciando';
       estado.waState = estado.qrText ? 'QR' : 'CARGANDO';
       estado.lastError = '';
       console.warn(`${id} navegando en WhatsApp Web, reintentando estado...`);
+
+      if (estado.transientErrors >= TRANSIENT_RESTART_LIMIT) {
+        estado.transientErrors = 0;
+        programarReinicioBot(estado, 'timeout al iniciar');
+      }
+
       return;
     }
 
@@ -363,7 +411,7 @@ async function iniciarBotsConSesion() {
     if (tieneSesionGuardada(id)) {
       iniciarBot(id);
       console.log(`Iniciando ${id} con sesion guardada...`);
-      await new Promise(r => setTimeout(r, 4000));
+      await new Promise(r => setTimeout(r, BOT_START_DELAY_MS));
     } else {
       console.log(`${id} sin sesion guardada. Use el panel admin para generar QR.`);
     }
