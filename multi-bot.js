@@ -78,7 +78,9 @@ O solicita tu servicio directamente aquí:
 🔵 https://sistema.transmillas.com/nueva_plataforma/controller/SolicitudWhatsAppController.php`;
 
 const botIds = ['empresa-bot-1','empresa-bot-2','empresa-bot-3',
-  'empresa-bot-4','empresa-bot-5','empresa-bot-6','empresa-bot-7','empresa-bot-8'];
+  'empresa-bot-4','empresa-bot-5','empresa-bot-6','empresa-bot-7',
+  'empresa-bot-8','empresa-bot-9','empresa-bot-10','empresa-bot-11',
+  'empresa-bot-12','empresa-bot-13','empresa-bot-14'];
 // const botIds = [
 //   'empresa-bot-1','empresa-bot-2','empresa-bot-3','empresa-bot-4',
 //   'empresa-bot-5','empresa-bot-6','empresa-bot-7','empresa-bot-8',
