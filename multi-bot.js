@@ -1,20 +1,21 @@
-// Control de frecuencia por numero
+// Control de frecuencia por bot y chat
 const controlFrecuencia = new Map();
 const LIMITE_HORAS = 1; // puedes poner 24 si quieres solo 1 vez al dia
 
-function puedeEnviar(numero) {
+function puedeEnviar(botId, chatId) {
   const ahora = Date.now();
-  const ultimaVez = controlFrecuencia.get(numero);
+  const clave = `${botId}:${chatId}`;
+  const ultimaVez = controlFrecuencia.get(clave);
 
   if (!ultimaVez) {
-    controlFrecuencia.set(numero, ahora);
+    controlFrecuencia.set(clave, ahora);
     return true;
   }
 
   const diferenciaHoras = (ahora - ultimaVez) / (1000 * 60 * 60);
 
   if (diferenciaHoras >= LIMITE_HORAS) {
-    controlFrecuencia.set(numero, ahora);
+    controlFrecuencia.set(clave, ahora);
     return true;
   }
 
@@ -357,11 +358,11 @@ function iniciarBot(id, opciones = {}) {
 
       console.log(`(${id}) Mensaje de ${msg.from}: "${msg.body}"`);
 
-      if (puedeEnviar(msg.from)) {
+      if (puedeEnviar(id, msg.from)) {
         await client.sendMessage(msg.from, mensajeComun);
         console.log(`(${id}) Mensaje automatico enviado a ${msg.from}`);
       } else {
-        console.log(`(${id}) No se envia mensaje repetido a ${msg.from}`);
+        console.log(`(${id}) No se envia mensaje repetido a ${msg.from} dentro de ${LIMITE_HORAS} hora(s)`);
       }
     } catch (err) {
       console.error(`(${id}) Error manejando mensaje:`, err.message);
