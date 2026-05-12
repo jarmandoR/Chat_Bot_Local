@@ -63,6 +63,7 @@ cargarEnvLocal();
 const ADMIN_PORT = Number(process.env.ADMIN_PORT || 3030);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || crypto.randomBytes(18).toString('hex');
 const AUTH_DIR = path.join(__dirname, '.wwebjs_auth');
+const LINK_HISTORY_FILE = path.join(__dirname, 'whatsapp-links.json');
 const clients = new Map();
 const BOT_START_DELAY_MS = Number(process.env.BOT_START_DELAY_MS || 12000);
 const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS || 60000);
@@ -120,17 +121,59 @@ function tieneSesionGuardada(id) {
   return fs.existsSync(path.join(AUTH_DIR, `session-${id}`));
 }
 
+function rutaSesion(id) {
+  return path.join(AUTH_DIR, `session-${id}`);
+}
+
+function cargarHistorialVinculos() {
+  try {
+    if (!fs.existsSync(LINK_HISTORY_FILE)) return {};
+    return JSON.parse(fs.readFileSync(LINK_HISTORY_FILE, 'utf8'));
+  } catch (err) {
+    console.error('No se pudo leer historial de vinculos:', err.message);
+    return {};
+  }
+}
+
+const historialVinculos = cargarHistorialVinculos();
+
+function guardarHistorialVinculos() {
+  try {
+    fs.writeFileSync(LINK_HISTORY_FILE, JSON.stringify(historialVinculos, null, 2));
+  } catch (err) {
+    console.error('No se pudo guardar historial de vinculos:', err.message);
+  }
+}
+
+function guardarInfoVinculada(estado) {
+  if (!estado.numero) return;
+
+  historialVinculos[estado.id] = {
+    numero: estado.numero,
+    nombre: estado.nombre || '',
+    actualizadoEn: new Date().toISOString()
+  };
+  guardarHistorialVinculos();
+}
+
 function crearEstado(id) {
+  const historial = historialVinculos[id] || {};
+
   return {
     id,
     client: null,
     status: 'detenido',
     waState: '',
     numero: '',
+    ultimoNumero: historial.numero || '',
     nombre: '',
+    ultimoNombre: historial.nombre || '',
+    ultimoVinculoAt: historial.actualizadoEn ? new Date(historial.actualizadoEn) : null,
     qrText: '',
     qrAt: null,
     manualQr: false,
+    desvinculando: false,
+    autoReconnect: true,
     reconnectTimer: null,
     restartTimer: null,
     transientErrors: 0,
@@ -153,6 +196,13 @@ function actualizarInfoVinculada(estado, client) {
 
   if (numero) estado.numero = numero;
   if (info.pushname) estado.nombre = info.pushname;
+
+  if (estado.numero) {
+    estado.ultimoNumero = estado.numero;
+    estado.ultimoNombre = estado.nombre || estado.ultimoNombre;
+    estado.ultimoVinculoAt = new Date();
+    guardarInfoVinculada(estado);
+  }
 }
 
 function esErrorFrameTransitorio(err) {
@@ -167,6 +217,57 @@ async function destruirCliente(client) {
     await client.destroy();
   } catch (err) {
     console.error('No se pudo cerrar el cliente anterior:', err.message);
+  }
+}
+
+async function desvincularBot(id) {
+  const estado = estadoBot(id);
+  const client = estado.client;
+  estado.desvinculando = true;
+  estado.autoReconnect = false;
+
+  if (estado.numero || estado.ultimoNumero) {
+    if (!estado.numero && estado.ultimoNumero) estado.numero = estado.ultimoNumero;
+    guardarInfoVinculada(estado);
+  }
+
+  estado.numero = '';
+  estado.nombre = '';
+  estado.client = null;
+  estado.status = 'desconectado';
+  estado.waState = 'UNLINKED';
+  estado.qrText = '';
+  estado.qrAt = null;
+  estado.manualQr = false;
+  estado.transientErrors = 0;
+  estado.lastDisconnectedAt = new Date();
+
+  if (estado.reconnectTimer) {
+    clearTimeout(estado.reconnectTimer);
+    estado.reconnectTimer = null;
+  }
+  if (estado.restartTimer) {
+    clearTimeout(estado.restartTimer);
+    estado.restartTimer = null;
+  }
+
+  if (client) {
+    try {
+      await client.logout();
+    } catch (err) {
+      console.error(`${id} no pudo cerrar sesion desde WhatsApp:`, err.message);
+    }
+
+    await destruirCliente(client);
+  }
+
+  try {
+    fs.rmSync(rutaSesion(id), { recursive: true, force: true });
+  } catch (err) {
+    estado.lastError = `No se pudo borrar la sesion local: ${err.message}`;
+    throw err;
+  } finally {
+    estado.desvinculando = false;
   }
 }
 
@@ -279,6 +380,8 @@ function iniciarBot(id, opciones = {}) {
   estado.qrAt = null;
   estado.lastError = '';
   estado.transientErrors = 0;
+  estado.desvinculando = false;
+  estado.autoReconnect = true;
 
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: id }),
@@ -378,6 +481,8 @@ function iniciarBot(id, opciones = {}) {
     estado.lastDisconnectedAt = new Date();
 
     if (estado.reconnectTimer) clearTimeout(estado.reconnectTimer);
+    if (estado.desvinculando || !estado.autoReconnect) return;
+
     estado.reconnectTimer = setTimeout(() => {
       iniciarBot(id, { manualQr: false });
     }, 5000);
@@ -439,7 +544,7 @@ function responder(res, statusCode, body, contentType = 'text/html; charset=utf-
 }
 
 function formatearFecha(fecha) {
-  return fecha ? fecha.toLocaleString() : 'Nunca';
+  return fecha && !Number.isNaN(fecha.getTime()) ? fecha.toLocaleString() : 'Nunca';
 }
 
 function obtenerEtiquetaVinculo(estado) {
@@ -458,7 +563,9 @@ function renderBotCard(id, token) {
   const waState = estado.waState ? ` - WhatsApp: <strong>${htmlEscape(estado.waState)}</strong>` : '';
   const sesion = tieneSesionGuardada(id) ? 'Si' : 'No';
   const numero = estado.numero ? `+${estado.numero}` : 'Sin detectar';
+  const ultimoNumero = estado.ultimoNumero ? `+${estado.ultimoNumero}` : 'Sin historial';
   const nombre = estado.nombre || 'Sin nombre';
+  const ultimoNombre = estado.ultimoNombre || 'Sin historial';
   const error = estado.lastError ? `<div class="error">${htmlEscape(estado.lastError)}</div>` : '';
   const qr = estado.qrText
     ? `<pre class="qr">${htmlEscape(estado.qrText)}</pre><small>QR generado: ${htmlEscape(estado.qrAt.toLocaleString())} <span class="qr-countdown" data-qr-at="${estado.qrAt.toISOString()}"></span></small>`
@@ -475,13 +582,19 @@ function renderBotCard(id, token) {
           <form method="POST" action="/qr/${encodeURIComponent(id)}?token=${token}" data-qr-form data-bot-id="${htmlEscape(id)}">
             <button type="submit">Generar QR</button>
           </form>
+          <form method="POST" action="/unlink/${encodeURIComponent(id)}?token=${token}" data-unlink-form data-bot-id="${htmlEscape(id)}">
+            <button type="submit" class="danger">Desvincular</button>
+          </form>
         </div>
         <div class="details">
           <p><span>Numero vinculado</span><strong>${htmlEscape(numero)}</strong></p>
+          <p><span>Ultimo numero conocido</span><strong>${htmlEscape(ultimoNumero)}</strong></p>
           <p><span>Nombre</span><strong>${htmlEscape(nombre)}</strong></p>
+          <p><span>Ultimo nombre conocido</span><strong>${htmlEscape(ultimoNombre)}</strong></p>
           <p><span>Estado interno</span><strong>${status}</strong>${waState}</p>
           <p><span>Sesion guardada</span><strong>${sesion}</strong></p>
           <p><span>Ultimo listo</span><strong>${htmlEscape(formatearFecha(estado.lastReadyAt))}</strong></p>
+          <p><span>Ultimo vinculo detectado</span><strong>${htmlEscape(formatearFecha(estado.ultimoVinculoAt))}</strong></p>
           <p><span>Ultima revision</span><strong>${htmlEscape(formatearFecha(estado.lastCheckAt))}</strong></p>
           <p><span>Ultima desconexion</span><strong>${htmlEscape(formatearFecha(estado.lastDisconnectedAt))}</strong></p>
           ${error}
@@ -550,6 +663,8 @@ function renderPanel(reqUrl) {
     .details strong { color: #111827; }
     button { background: var(--verde); color: white; border: 0; border-radius: 6px; padding: 10px 14px; cursor: pointer; font-weight: 700; box-shadow: 0 1px 0 rgba(0,0,0,0.08); }
     button:hover { background: #006f5d; }
+    button.danger { background: var(--rojo); }
+    button.danger:hover { background: #a61f1f; }
     button[disabled] { cursor: wait; opacity: 0.7; }
     .spinner {
       display: inline-block;
@@ -669,6 +784,7 @@ function renderPanel(reqUrl) {
     document.addEventListener('submit', async event => {
       const form = event.target;
       const qrForm = form.closest('[data-qr-form]');
+      const unlinkForm = form.closest('[data-unlink-form]');
 
       if (qrForm) {
         event.preventDefault();
@@ -690,6 +806,26 @@ function renderPanel(reqUrl) {
             updatedButton.disabled = false;
             updatedButton.innerHTML = 'Generar QR';
           }
+        }
+        return;
+      }
+
+      if (unlinkForm) {
+        event.preventDefault();
+        const id = unlinkForm.dataset.botId;
+        if (!confirm('Desvincular ' + id + '? Luego deberas generar un QR para volverlo a atar.')) return;
+
+        const button = unlinkForm.querySelector('button');
+        button.disabled = true;
+        button.textContent = 'Desvinculando...';
+
+        try {
+          const response = await fetch(unlinkForm.action, { method: 'POST' });
+          if (!response.ok) throw new Error('No se pudo desvincular ' + id);
+          await replaceBotCard(id);
+          await replaceSummary();
+        } catch (err) {
+          alert(err.message);
         }
         return;
       }
@@ -764,6 +900,22 @@ function iniciarPanelAdmin() {
 
       iniciarBot(id, { manualQr: true });
       responder(res, 204, '');
+      return;
+    }
+
+    if (req.method === 'POST' && reqUrl.pathname.startsWith('/unlink/')) {
+      const id = decodeURIComponent(reqUrl.pathname.replace('/unlink/', ''));
+      if (!botIds.includes(id)) {
+        responder(res, 404, '<h1>404</h1><p>Bot no encontrado.</p>');
+        return;
+      }
+
+      try {
+        await desvincularBot(id);
+        responder(res, 204, '');
+      } catch (err) {
+        responder(res, 500, `<h1>500</h1><p>${htmlEscape(err.message)}</p>`);
+      }
       return;
     }
 
